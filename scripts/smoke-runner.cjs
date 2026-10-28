@@ -1,0 +1,40 @@
+const fs = require('node:fs');
+const path = require('node:path');
+module.exports = async ({ app, win, library }) => {
+  const output = process.env.MELD_SMOKE_OUTPUT || path.join(library.dir, 'smoke'); fs.mkdirSync(output, { recursive: true });
+  const checks = [], errors = [];
+  win.webContents.on('console-message', event => { if (event.level === 'error') errors.push(event.message); });
+  const js = code => win.webContents.executeJavaScript(code, true);
+  const check = (name, ok) => { checks.push({ name, ok: Boolean(ok) }); if (!ok) throw new Error(name); };
+  try {
+    await new Promise(resolve => setTimeout(resolve, 800));
+    check('renderer has no Node integration', await js("typeof require === 'undefined' && typeof process === 'undefined'"));
+    check('renderer initialized', await js("document.getElementById('version').textContent === '0.1.0'"));
+    check('empty collection shown', await js("!document.getElementById('empty-state').hidden"));
+    fs.writeFileSync(path.join(output, 'Meld-preview.png'), (await win.webContents.capturePage()).toPNG());
+    const file = path.join(library.dir, 'Meld - Audio check.wav'), samples = 44100 * 4;
+    const wav = Buffer.alloc(44 + samples * 2); wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(44100, 24); wav.writeUInt32LE(88200, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(samples * 2, 40);
+    for (let i = 0; i < samples; i++) wav.writeInt16LE(Math.sin(i / 44100 * 440 * 2 * Math.PI) * 2000, 44 + i * 2); fs.writeFileSync(file, wav);
+    library.addLocal([file]); await new Promise(resolve => setTimeout(resolve, 100));
+    check('imported track rendered', await js("document.querySelectorAll('.track-row').length === 1"));
+    await js("document.querySelector('[data-action=favorite]').click()"); await new Promise(resolve => setTimeout(resolve, 100));
+    check('favorite stored through IPC', library.state.tracks[0].favorite);
+    await js("document.querySelector('[data-action=play]').click()"); await new Promise(resolve => setTimeout(resolve, 1500));
+    console.log('Audio diagnostics:', await js("JSON.stringify({paused:document.getElementById('audio').paused,time:document.getElementById('audio').currentTime,ready:document.getElementById('audio').readyState,error:document.getElementById('audio').error?.message,toast:document.getElementById('toast').textContent})"));
+    check('actual local audio playback advances', await js("!document.getElementById('audio').paused && document.getElementById('audio').currentTime > 0"));
+    await js("document.getElementById('audio').currentTime = 2"); await new Promise(resolve => setTimeout(resolve, 150));
+    check('seeking works', await js("document.getElementById('audio').currentTime >= 2"));
+    await js("document.getElementById('play').click()"); check('pause works', await js("document.getElementById('audio').paused"));
+    await js("document.getElementById('search').value = 'missing'; document.getElementById('search').dispatchEvent(new Event('input'))"); check('search filters collection', await js("document.querySelectorAll('.track-row').length === 0"));
+    await js("document.getElementById('search').value = ''; document.getElementById('search').dispatchEvent(new Event('input')); document.getElementById('settings-button').click()"); check('settings dialog opens', await js("document.getElementById('settings-dialog').open"));
+    await js("document.getElementById('settings-dialog').close(); document.getElementById('hero-import').click()"); check('import dialog opens', await js("document.getElementById('import-dialog').open"));
+    await js("document.getElementById('import-dialog').close()");
+    const range = await js(`fetch('meld://audio/${library.state.tracks[0].id}', { headers: { Range: 'bytes=10-29' } }).then(async r => ({ status: r.status, bytes: (await r.arrayBuffer()).byteLength }))`);
+    check('media protocol honors byte ranges', range.status === 206 && range.bytes === 20);
+    check('media protocol blocks arbitrary files', await js("fetch('meld://audio/../../etc/passwd').then(r => r.status >= 400)"));
+    check('no renderer errors', !errors.length);
+    fs.writeFileSync(path.join(output, 'Meld-library-check.png'), (await win.webContents.capturePage()).toPNG());
+    fs.writeFileSync(path.join(output, 'ui-smoke.json'), JSON.stringify({ checks, errors }, null, 2));
+    console.log(JSON.stringify({ uiSmoke: 'passed', checks: checks.length, output })); app.exit(0);
+  } catch (error) { fs.writeFileSync(path.join(output, 'ui-smoke.json'), JSON.stringify({ checks, errors, failure: error.message }, null, 2)); console.error(error); app.exit(1); }
+};

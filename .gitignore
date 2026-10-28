@@ -1,0 +1,16 @@
+node_modules/
+release/
+.DS_Store
+*.log
+.build/
+dist/
+.env
+.env.*
+!.env.example
+/audio/
+/jobs/
+/tools/
+/library.json*
+/credentials.bin
+/smoke/
+*.zip
